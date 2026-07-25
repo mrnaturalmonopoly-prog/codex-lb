@@ -407,6 +407,88 @@ async def test_fleet_summary_usage_sample_time_tracks_newest_sample(async_client
 
 
 @pytest.mark.asyncio
+async def test_fleet_summary_usage_sample_time_covers_secondary_only_freshness(async_client, db_setup):
+    """Every reported window must contribute to the sample time. With the newest
+    row in the *secondary* window, the field must still track it — otherwise a
+    weekly-only refresh would look permanently stale."""
+    plain_key = await _create_api_key("fleet-summary-usage-secondary-key")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    older = now - timedelta(hours=9)
+    newer = now - timedelta(minutes=3)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc_usage_secondary", "usage-secondary@example.com"))
+        await usage_repo.add_entry(
+            "acc_usage_secondary",
+            30.0,
+            window="primary",
+            reset_at=now_epoch + 300,
+            window_minutes=_PRIMARY_WINDOW_MINUTES,
+            recorded_at=older,
+        )
+        await usage_repo.add_entry(
+            "acc_usage_secondary",
+            55.0,
+            window="secondary",
+            reset_at=now_epoch + 5 * 24 * 3600,
+            window_minutes=_SECONDARY_WINDOW_MINUTES,
+            recorded_at=newer,
+        )
+
+    response = await async_client.get(
+        "/api/fleet/summary",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    account = response.json()["accounts"][0]
+    assert account["usageRecordedAt"] is not None
+    assert account["usageRecordedAt"].startswith(newer.replace(microsecond=0).isoformat()[:16])
+
+
+@pytest.mark.asyncio
+async def test_fleet_summary_last_refresh_at_remains_the_auth_token_timestamp(async_client, db_setup):
+    """Backward-compatibility guard: `lastRefreshAt` must keep reporting the
+    account's auth-token refresh time and must not be quietly repurposed to the
+    usage-sample time, which would break existing fleet consumers."""
+    plain_key = await _create_api_key("fleet-summary-last-refresh-key")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    token_refreshed_at = now - timedelta(hours=5)
+    sampled_at = now - timedelta(minutes=1)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        account = _make_account("acc_refresh_distinct", "refresh-distinct@example.com")
+        account.last_refresh = token_refreshed_at
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            "acc_refresh_distinct",
+            41.0,
+            window="primary",
+            reset_at=now_epoch + 300,
+            window_minutes=_PRIMARY_WINDOW_MINUTES,
+            recorded_at=sampled_at,
+        )
+
+    response = await async_client.get(
+        "/api/fleet/summary",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["accounts"][0]
+    # The two timestamps describe different events and must not collapse.
+    assert payload["lastRefreshAt"] != payload["usageRecordedAt"]
+    assert payload["lastRefreshAt"].startswith(token_refreshed_at.replace(microsecond=0).isoformat()[:16])
+    assert payload["usageRecordedAt"].startswith(sampled_at.replace(microsecond=0).isoformat()[:16])
+
+
+@pytest.mark.asyncio
 async def test_fleet_summary_usage_sample_time_is_null_without_usage_history(async_client, db_setup):
     """An account that has never been sampled reports no sample time rather than
     borrowing the auth-token refresh timestamp."""

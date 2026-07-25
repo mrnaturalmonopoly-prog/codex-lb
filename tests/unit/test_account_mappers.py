@@ -4,7 +4,11 @@ from datetime import datetime
 
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts import mappers
-from app.modules.accounts.mappers import _effective_status_from_usage, _normalize_account_routing_policy
+from app.modules.accounts.mappers import (
+    _effective_status_from_usage,
+    _newest_usage_recorded_at,
+    _normalize_account_routing_policy,
+)
 
 
 def _usage(
@@ -170,3 +174,35 @@ def test_normalize_account_routing_policy() -> None:
     assert _normalize_account_routing_policy("preserve") == "preserve"
     assert _normalize_account_routing_policy("legacy") == "normal"
     assert _normalize_account_routing_policy(None) == "normal"
+
+
+def _usage_row(recorded_at: datetime | None, window: str) -> UsageHistory:
+    return UsageHistory(
+        account_id="acc",
+        recorded_at=recorded_at,
+        window=window,
+        used_percent=10.0,
+    )
+
+
+def test_newest_usage_recorded_at_picks_the_newest_window() -> None:
+    older = _usage_row(datetime(2026, 1, 1, 8, 0, 0), "secondary")
+    newer = _usage_row(datetime(2026, 1, 1, 20, 0, 0), "primary")
+    assert _newest_usage_recorded_at(older, newer) == datetime(2026, 1, 1, 20, 0, 0)
+    # Argument order must not matter.
+    assert _newest_usage_recorded_at(newer, older) == datetime(2026, 1, 1, 20, 0, 0)
+
+
+def test_newest_usage_recorded_at_returns_none_without_samples() -> None:
+    assert _newest_usage_recorded_at(None, None, None) is None
+
+
+def test_newest_usage_recorded_at_tolerates_rows_without_a_timestamp() -> None:
+    """``recorded_at`` is server-defaulted, so an in-memory row that has not been
+    flushed can still carry ``None``. Comparing that against a datetime would
+    raise ``TypeError`` and take down the whole accounts/fleet projection, so
+    such rows must be skipped rather than compared."""
+    timestamped = _usage_row(datetime(2026, 1, 1, 9, 30, 0), "primary")
+    untimestamped = _usage_row(None, "secondary")
+    assert _newest_usage_recorded_at(untimestamped, timestamped) == datetime(2026, 1, 1, 9, 30, 0)
+    assert _newest_usage_recorded_at(untimestamped) is None
