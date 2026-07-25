@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts import mappers
 from app.modules.accounts.mappers import (
@@ -206,3 +207,55 @@ def test_newest_usage_recorded_at_tolerates_rows_without_a_timestamp() -> None:
     untimestamped = _usage_row(None, "secondary")
     assert _newest_usage_recorded_at(untimestamped, timestamped) == datetime(2026, 1, 1, 9, 30, 0)
     assert _newest_usage_recorded_at(untimestamped) is None
+
+
+def test_newest_usage_recorded_at_includes_the_monthly_window() -> None:
+    """Monthly-only plans (e.g. Free, monthly-window Team) carry their sample in
+    the monthly row, so it must contribute to the reported sample time. Omitting
+    it would make those accounts look permanently unsampled."""
+    primary = _usage_row(datetime(2026, 1, 1, 6, 0, 0), "primary")
+    monthly = _usage_row(datetime(2026, 1, 1, 18, 0, 0), "monthly")
+    assert _newest_usage_recorded_at(primary, None, monthly) == datetime(2026, 1, 1, 18, 0, 0)
+    # Monthly alone must still be reported.
+    assert _newest_usage_recorded_at(None, None, monthly) == datetime(2026, 1, 1, 18, 0, 0)
+
+
+def test_account_summary_reports_monthly_sample_time_for_monthly_only_plan() -> None:
+    """Drive the real mapper, not just the helper: a free plan carries its quota
+    in the monthly window, so the summary's sample time must come from that row.
+    Exercising the call site catches a monthly argument dropped in the mapper,
+    which a helper-only test cannot see."""
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_monthly",
+        chatgpt_account_id=None,
+        email="monthly@example.com",
+        plan_type="free",
+        access_token_encrypted=encryptor.encrypt("access"),
+        refresh_token_encrypted=encryptor.encrypt("refresh"),
+        id_token_encrypted=encryptor.encrypt("id"),
+        last_refresh=datetime(2026, 1, 1, 1, 0, 0),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    monthly_recorded_at = datetime(2026, 1, 1, 18, 0, 0)
+    monthly = UsageHistory(
+        account_id=account.id,
+        recorded_at=monthly_recorded_at,
+        window="monthly",
+        used_percent=40.0,
+        window_minutes=43200,
+    )
+
+    summaries = mappers.build_account_summaries(
+        accounts=[account],
+        primary_usage={},
+        secondary_usage={},
+        monthly_usage={account.id: monthly},
+        encryptor=encryptor,
+        include_auth=False,
+    )
+
+    assert summaries[0].usage_recorded_at == monthly_recorded_at
+    # And it must not be confused with the auth-token refresh timestamp.
+    assert summaries[0].last_refresh_at == datetime(2026, 1, 1, 1, 0, 0)
