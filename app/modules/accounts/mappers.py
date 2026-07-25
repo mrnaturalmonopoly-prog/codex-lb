@@ -277,6 +277,7 @@ def _account_to_summary(
         window_minutes_secondary=window_minutes_secondary,
         window_minutes_monthly=window_minutes_monthly,
         last_refresh_at=account.last_refresh,
+        usage_recorded_at=_newest_usage_recorded_at(primary_usage, secondary_usage, monthly_usage),
         capacity_credits_primary=capacity_primary,
         remaining_credits_primary=remaining_credits_primary,
         capacity_credits_secondary=capacity_secondary,
@@ -478,6 +479,20 @@ def _normalize_used_percent(entry: UsageHistory | None) -> float | None:
     if not entry:
         return None
     return entry.used_percent
+
+
+def _newest_usage_recorded_at(*entries: UsageHistory | None) -> datetime | None:
+    """Newest persisted usage-sample time across an account's usage windows.
+
+    Read from the rows the caller already loaded, so no extra query is issued
+    for what is a fleet-wide, per-account projection. Returns ``None`` when the
+    account has never been sampled, rather than falling back to an unrelated
+    timestamp such as the auth-token refresh time (issue #1461).
+    """
+    recorded_times = [entry.recorded_at for entry in entries if entry is not None and entry.recorded_at is not None]
+    if not recorded_times:
+        return None
+    return max(recorded_times)
 
 
 def _extract_credit_status(

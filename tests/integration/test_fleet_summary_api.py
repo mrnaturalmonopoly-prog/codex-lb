@@ -333,7 +333,124 @@ async def test_fleet_summary_omits_sensitive_fields(async_client, db_setup):
         "primary",
         "secondary",
         "lastRefreshAt",
+        "usageRecordedAt",
     }
+
+
+@pytest.mark.asyncio
+async def test_fleet_summary_reports_usage_sample_time(async_client, db_setup):
+    """Regression for #1461: fleet consumers need the timestamp of the usage
+    sample backing the reported quota, which `lastRefreshAt` (an auth-token
+    refresh time) does not provide."""
+    plain_key = await _create_api_key("fleet-summary-usage-recorded-key")
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    await _seed_account_with_windows(
+        "acc_usage_recorded",
+        "usage-recorded@example.com",
+        primary_used_percent=43.0,
+        secondary_used_percent=47.0,
+        primary_reset_at=now_epoch + 300,
+        secondary_reset_at=now_epoch + 5 * 24 * 3600,
+    )
+
+    response = await async_client.get(
+        "/api/fleet/summary",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    account = response.json()["accounts"][0]
+    assert account["usageRecordedAt"] is not None
+
+
+@pytest.mark.asyncio
+async def test_fleet_summary_usage_sample_time_tracks_newest_sample(async_client, db_setup):
+    """The exposed sample time must follow the newest persisted usage row, and
+    must do so without the auth-token refresh timestamp changing."""
+    plain_key = await _create_api_key("fleet-summary-usage-newest-key")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    older = now - timedelta(hours=6)
+    newer = now - timedelta(minutes=2)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc_usage_newest", "usage-newest@example.com"))
+        await usage_repo.add_entry(
+            "acc_usage_newest",
+            50.0,
+            window="secondary",
+            reset_at=now_epoch + 5 * 24 * 3600,
+            window_minutes=_SECONDARY_WINDOW_MINUTES,
+            recorded_at=older,
+        )
+        await usage_repo.add_entry(
+            "acc_usage_newest",
+            35.0,
+            window="primary",
+            reset_at=now_epoch + 300,
+            window_minutes=_PRIMARY_WINDOW_MINUTES,
+            recorded_at=newer,
+        )
+
+    response = await async_client.get(
+        "/api/fleet/summary",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    account = response.json()["accounts"][0]
+    # The newest sample governs, not the older sibling window.
+    assert account["usageRecordedAt"] is not None
+    assert account["usageRecordedAt"].startswith(newer.replace(microsecond=0).isoformat()[:16])
+
+
+@pytest.mark.asyncio
+async def test_fleet_summary_usage_sample_time_is_null_without_usage_history(async_client, db_setup):
+    """An account that has never been sampled reports no sample time rather than
+    borrowing the auth-token refresh timestamp."""
+    plain_key = await _create_api_key("fleet-summary-usage-absent-key")
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_usage_absent", "usage-absent@example.com"))
+
+    response = await async_client.get(
+        "/api/fleet/summary",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    account = response.json()["accounts"][0]
+    assert account["usageRecordedAt"] is None
+
+
+@pytest.mark.asyncio
+async def test_fleet_summary_hides_usage_sample_time_when_usage_visibility_denied(async_client, db_setup):
+    """Quota freshness metadata must follow the same visibility rule as the quota
+    values themselves, so a key denied usage cannot infer sampling activity."""
+    plain_key = await _create_api_key(
+        "fleet-summary-usage-hidden-key",
+        usage_sections="upstream_limits",
+    )
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    await _seed_account_with_windows(
+        "acc_usage_hidden",
+        "usage-hidden@example.com",
+        primary_used_percent=21.0,
+        secondary_used_percent=22.0,
+        primary_reset_at=now_epoch + 300,
+        secondary_reset_at=now_epoch + 5 * 24 * 3600,
+    )
+
+    response = await async_client.get(
+        "/api/fleet/summary",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    account = response.json()["accounts"][0]
+    assert account["usageRecordedAt"] is None
+    assert account["lastRefreshAt"] is None
 
 
 @pytest.mark.asyncio

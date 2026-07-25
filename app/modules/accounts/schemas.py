@@ -100,6 +100,10 @@ class AccountSummary(DashboardModel):
     window_minutes_secondary: int | None = None
     window_minutes_monthly: int | None = None
     last_refresh_at: datetime | None = None
+    # Newest persisted usage-sample time for this account. Distinct from
+    # ``last_refresh_at``, which is the auth-token refresh timestamp and is
+    # unrelated to when the reported quota was sampled (issue #1461).
+    usage_recorded_at: datetime | None = None
     capacity_credits_primary: float | None = None
     remaining_credits_primary: float | None = None
     capacity_credits_secondary: float | None = None

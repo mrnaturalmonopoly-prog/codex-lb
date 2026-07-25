@@ -25,7 +25,12 @@ class FleetAccountSummary(DashboardModel):
     plan_type: str
     primary: FleetWindowSummary
     secondary: FleetWindowSummary
+    # Auth-token refresh time. Kept for backward compatibility; it does not
+    # describe when the reported quota was sampled.
     last_refresh_at: datetime | None = None
+    # Newest persisted usage-sample time backing the windows above, so consumers
+    # can tell fresh quota from stale quota (issue #1461).
+    usage_recorded_at: datetime | None = None
 
 
 class FleetSummaryResponse(DashboardModel):
