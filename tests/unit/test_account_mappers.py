@@ -259,3 +259,60 @@ def test_account_summary_reports_monthly_sample_time_for_monthly_only_plan() -> 
     assert summaries[0].usage_recorded_at == monthly_recorded_at
     # And it must not be confused with the auth-token refresh timestamp.
     assert summaries[0].last_refresh_at == datetime(2026, 1, 1, 1, 0, 0)
+
+
+def test_account_summary_sample_time_uses_raw_rows_not_display_filtered_windows() -> None:
+    """The sample time must come from the rows as persisted, not from the
+    display-filtered windows.
+
+    A monthly-capacity plan suppresses the primary and secondary figures in the
+    response, but codex-lb still sampled those rows. If the derivation used the
+    display-filtered windows instead, a newer primary sample would be discarded
+    and the account would look staler than it is."""
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_raw_rows",
+        chatgpt_account_id=None,
+        email="raw-rows@example.com",
+        plan_type="free",
+        access_token_encrypted=encryptor.encrypt("access"),
+        refresh_token_encrypted=encryptor.encrypt("refresh"),
+        id_token_encrypted=encryptor.encrypt("id"),
+        last_refresh=datetime(2026, 1, 1, 1, 0, 0),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    newest_primary_at = datetime(2026, 1, 5, 23, 0, 0)
+    older_monthly_at = datetime(2026, 1, 1, 1, 0, 0)
+
+    summaries = mappers.build_account_summaries(
+        accounts=[account],
+        primary_usage={
+            account.id: UsageHistory(
+                account_id=account.id,
+                recorded_at=newest_primary_at,
+                window="primary",
+                used_percent=50.0,
+                window_minutes=300,
+            )
+        },
+        secondary_usage={},
+        monthly_usage={
+            account.id: UsageHistory(
+                account_id=account.id,
+                recorded_at=older_monthly_at,
+                window="monthly",
+                used_percent=10.0,
+                window_minutes=43200,
+            )
+        },
+        encryptor=encryptor,
+        include_auth=False,
+    )
+
+    summary = summaries[0]
+    # The monthly plan suppresses the short-window figures...
+    assert summary.usage is not None
+    assert summary.usage.primary_remaining_percent is None
+    # ...but the newest persisted sample still governs the reported sample time.
+    assert summary.usage_recorded_at == newest_primary_at

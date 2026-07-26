@@ -22,10 +22,18 @@ The system SHALL expose `GET /api/fleet/summary` for trusted local fleet consume
 ### Requirement: Fleet summary reports per-account quota sample time
 
 Fleet summary responses MUST expose `usageRecordedAt` for each account: the
-timestamp of the newest persisted usage sample backing the quota values reported
-in that account's `primary` and `secondary` windows. The value MUST be derived
-from the account's persisted usage samples, so a fleet consumer can determine
-whether the reported quota is current.
+timestamp of the newest usage sample persisted for that account across its
+primary, secondary, and monthly windows. The value MUST be derived from the
+account's persisted usage samples, so a fleet consumer can determine how recently
+codex-lb last sampled that account's quota upstream.
+
+`usageRecordedAt` describes the account's most recent sampling, not any single
+reported window. It MUST reflect the newest persisted sample even when the
+response omits that window's quota — for example when an elapsed primary reset is
+displayed as absent, or when a monthly-window plan suppresses the primary and
+secondary figures. Reporting the newest sampling activity is what lets a consumer
+distinguish "codex-lb has not talked to this account recently" from "this window
+is not currently reported", so the two values are deliberately independent.
 
 `usageRecordedAt` MUST be `null` when the account has no persisted usage sample.
 
@@ -39,6 +47,13 @@ required to change when `usageRecordedAt` changes.
 - **GIVEN** an account with a persisted usage sample backing its reported windows
 - **WHEN** a client calls `GET /api/fleet/summary` with a valid Bearer API key
 - **THEN** that account's `usageRecordedAt` equals the newest persisted usage-sample timestamp for the account
+
+#### Scenario: Sample time survives a window whose quota is not reported
+
+- **GIVEN** an account whose newest persisted usage sample is a primary-window row whose reset has already elapsed
+- **AND** the response therefore reports no primary quota for that account
+- **WHEN** a client calls `GET /api/fleet/summary` with a valid Bearer API key
+- **THEN** that account's `usageRecordedAt` still equals that newest persisted usage-sample timestamp
 
 #### Scenario: Account without usage history reports no sample time
 

@@ -489,6 +489,55 @@ async def test_fleet_summary_last_refresh_at_remains_the_auth_token_timestamp(as
 
 
 @pytest.mark.asyncio
+async def test_fleet_summary_usage_sample_time_survives_unreported_window(async_client, db_setup):
+    """The sample time describes the account's most recent sampling, not one
+    reported window. When a primary sample's reset has already elapsed the
+    response omits that quota, but the sample time must still reflect it —
+    otherwise a consumer cannot tell "not sampled recently" apart from "this
+    window is not currently reported"."""
+    plain_key = await _create_api_key("fleet-summary-unreported-window-key")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    newest_primary_at = now - timedelta(minutes=2)
+    older_secondary_at = now - timedelta(hours=8)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc_expired_primary", "expired-primary@example.com"))
+        # Elapsed primary reset: the mapper drops this window from the response.
+        await usage_repo.add_entry(
+            "acc_expired_primary",
+            100.0,
+            window="primary",
+            reset_at=now_epoch - 600,
+            window_minutes=_PRIMARY_WINDOW_MINUTES,
+            recorded_at=newest_primary_at,
+        )
+        await usage_repo.add_entry(
+            "acc_expired_primary",
+            30.0,
+            window="secondary",
+            reset_at=now_epoch + 5 * 24 * 3600,
+            window_minutes=_SECONDARY_WINDOW_MINUTES,
+            recorded_at=older_secondary_at,
+        )
+
+    response = await async_client.get(
+        "/api/fleet/summary",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    account = response.json()["accounts"][0]
+    # The primary quota is intentionally absent...
+    assert account["primary"]["remainingPercent"] is None
+    # ...but the sample time still reports the newest persisted sample.
+    assert account["usageRecordedAt"] is not None
+    assert account["usageRecordedAt"].startswith(newest_primary_at.replace(microsecond=0).isoformat()[:16])
+
+
+@pytest.mark.asyncio
 async def test_fleet_summary_usage_sample_time_is_null_without_usage_history(async_client, db_setup):
     """An account that has never been sampled reports no sample time rather than
     borrowing the auth-token refresh timestamp."""

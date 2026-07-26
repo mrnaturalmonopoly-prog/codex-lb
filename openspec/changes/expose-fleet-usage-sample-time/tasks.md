@@ -13,3 +13,5 @@
   when a newer sample is written while `lastRefreshAt` does not.
 - [x] Document the field and the `lastRefreshAt` distinction in the
   `fleet-summary` capability spec.
+- [x] State explicitly that the sample time describes the account's most recent
+  sampling rather than any single reported window, and cover the elapsed-reset case.
